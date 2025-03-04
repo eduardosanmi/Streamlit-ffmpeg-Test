@@ -8,22 +8,25 @@ from scipy.io.wavfile import write
 
 st.title("Real-Time Audio Streaming")
 
-sample_rate = 44100
-chunk_duration = 0.3  # Reduced chunk duration for smoother playback
-frequencies = [440, 480, 520, 580]
+# Audio configuration
+SAMPLE_RATE = 44100
+CHUNK_DURATION = 0.5  # Seconds per audio chunk
+FREQUENCIES = [440, 480, 520, 580, 540, 510]  # More frequencies for variation
 
 # Initialize session state
 if 'running' not in st.session_state:
     st.session_state.running = False
-    st.session_state.last_chunk_time = 0
-    st.session_state.chunk_queue = []
+    st.session_state.last_chunk = None
 
-def generate_audio_chunk(frequency, duration):
-    t = np.linspace(0, duration, int(sample_rate * duration), False)
+def generate_wav_chunk(frequency):
+    """Generate WAV-formatted audio chunk as base64 string"""
+    t = np.linspace(0, CHUNK_DURATION, int(SAMPLE_RATE * CHUNK_DURATION), False)
     audio = np.sin(2 * np.pi * frequency * t)
-    audio = (audio * 32767).astype(np.int16)
+    audio = (audio * 32767).astype(np.int16)  # 16-bit PCM
+    
+    # Create WAV file in memory
     buffer = io.BytesIO()
-    write(buffer, sample_rate, audio)
+    write(buffer, SAMPLE_RATE, audio)
     return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 # Control buttons
@@ -31,81 +34,91 @@ col1, col2 = st.columns(2)
 with col1:
     if st.button("Start Streaming") and not st.session_state.running:
         st.session_state.running = True
-        st.session_state.last_chunk_time = time.time()
 with col2:
     if st.button("Stop Streaming") and st.session_state.running:
         st.session_state.running = False
 
-html_code = """
+html_code = f"""
 <script>
 let audioContext = null;
-let nextTime = 0;
-let bufferQueue = [];
+let nextScheduledTime = 0;
+const bufferQueue = [];
+const MAX_BUFFER_AHEAD = 2;  // Buffer up to 2 seconds of audio
 
-function initAudioContext() {
-    if (!audioContext) {
+async function initAudioContext() {{
+    if (!audioContext) {{
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    }
-}
+        // Resume context if suspended (required by autoplay policies)
+        await audioContext.resume();
+    }}
+    return audioContext;
+}}
 
-function playNextChunk() {
-    if (!audioContext || bufferQueue.length === 0) return;
-    
-    const chunk = bufferQueue.shift();
-    audioContext.decodeAudioData(chunk.buffer, (buffer) => {
-        const source = audioContext.createBufferSource();
-        source.buffer = buffer;
-        source.connect(audioContext.destination);
-        const startTime = Math.max(nextTime, audioContext.currentTime);
-        source.start(startTime);
-        nextTime = startTime + buffer.duration;
-    });
-}
-
-// Check for new chunks every 50ms
-setInterval(() => {
-    if (bufferQueue.length > 0) playNextChunk();
-}, 50);
-
-window.addEventListener('message', (event) => {
-    if (event.data.type === 'AUDIO_CHUNK') {
-        const binaryString = window.atob(event.data.data);
+async function decodeAndSchedule(chunkBase64) {{
+    try {{
+        const audioContext = await initAudioContext();
+        const binaryString = window.atob(chunkBase64);
         const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
+        for (let i = 0; i < binaryString.length; i++) {{
             bytes[i] = binaryString.charCodeAt(i);
-        }
-        bufferQueue.push(bytes);
-    }
-    
-    if (event.data.type === 'INIT_AUDIO') {
-        initAudioContext();
-    }
-});
+        }}
+        
+        const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        
+        const startTime = Math.max(nextScheduledTime, audioContext.currentTime);
+        source.start(startTime);
+        nextScheduledTime = startTime + audioBuffer.duration;
+        
+        // Keep only needed buffers
+        while ((nextScheduledTime - audioContext.currentTime) > MAX_BUFFER_AHEAD) {{
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }}
+    }} catch (error) {{
+        console.error('Audio processing error:', error);
+    }}
+}}
+
+// Listen for audio chunks from Python
+window.addEventListener('message', (event) => {{
+    if (event.data.type === 'AUDIO_CHUNK') {{
+        decodeAndSchedule(event.data.chunk);
+    }}
+}});
+
+// Initialize audio context on user interaction
+document.addEventListener('click', async () => {{
+    await initAudioContext();
+}}, {{ once: true }});
 </script>
 """
 
-# Initialize audio context
-components.html(
-    "<script>window.parent.postMessage({ type: 'INIT_AUDIO' }, '*');</script>",
-    height=0
-)
-
-# Audio generation logic
-if st.session_state.running:
-    elapsed = time.time() - st.session_state.last_chunk_time
-    if elapsed >= chunk_duration:
-        freq = np.random.choice(frequencies)
-        chunk = generate_audio_chunk(freq, chunk_duration)
-        components.html(
-            f"<script>window.parent.postMessage({{ type: 'AUDIO_CHUNK', data: '{chunk}' }}, '*');</script>",
-            height=0
-        )
-        st.session_state.last_chunk_time = time.time()
-    
-    # Create a placeholder to keep the script running
-    placeholder = st.empty()
-    placeholder.write("Streaming...")
-    time.sleep(0.1)  # Reduced sleep time
-    st.rerun()  # Use st.rerun() if available
-
 components.html(html_code, height=0)
+
+# Audio generation loop
+while st.session_state.running:
+    start_time = time.time()
+    
+    # Generate and send audio chunk
+    freq = np.random.choice(FREQUENCIES)
+    chunk = generate_wav_chunk(freq)
+    
+    # Send chunk to JavaScript
+    components.html(
+        f"""
+        <script>
+            window.parent.postMessage({{
+                type: 'AUDIO_CHUNK',
+                chunk: '{chunk}'
+            }}, '*');
+        </script>
+        """,
+        height=0
+    )
+    
+    # Calculate sleep time to maintain real-time generation
+    elapsed = time.time() - start_time
+    sleep_time = max(CHUNK_DURATION - elapsed, 0)
+    time.sleep(sleep_time)
