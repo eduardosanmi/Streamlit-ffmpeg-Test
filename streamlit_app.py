@@ -11,12 +11,12 @@ st.title("Real-Time Audio Streaming")
 # Audio configuration
 SAMPLE_RATE = 44100
 CHUNK_DURATION = 0.5  # Seconds per audio chunk
-FREQUENCIES = [440, 480, 520, 580, 540, 510]  # More frequencies for variation
+FREQUENCIES = [440, 480, 520, 580]
 
 # Initialize session state
-if 'running' not in st.session_state:
+if 'audio_initialized' not in st.session_state:
+    st.session_state.audio_initialized = False
     st.session_state.running = False
-    st.session_state.last_chunk = None
 
 def generate_wav_chunk(frequency):
     """Generate WAV-formatted audio chunk as base64 string"""
@@ -32,75 +32,95 @@ def generate_wav_chunk(frequency):
 # Control buttons
 col1, col2 = st.columns(2)
 with col1:
-    if st.button("Start Streaming") and not st.session_state.running:
-        st.session_state.running = True
+    start_btn = st.button("Start Streaming", disabled=st.session_state.running)
 with col2:
-    if st.button("Stop Streaming") and st.session_state.running:
-        st.session_state.running = False
+    stop_btn = st.button("Stop Streaming", disabled=not st.session_state.running)
 
 html_code = f"""
 <script>
 let audioContext = null;
 let nextScheduledTime = 0;
 const bufferQueue = [];
-const MAX_BUFFER_AHEAD = 2;  // Buffer up to 2 seconds of audio
+const MAX_BUFFER_AHEAD = 1.5;  // Buffer up to 1.5 seconds of audio
 
 async function initAudioContext() {{
-    if (!audioContext) {{
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        // Resume context if suspended (required by autoplay policies)
-        await audioContext.resume();
+    try {{
+        if (!audioContext) {{
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            console.log('AudioContext created');
+        }}
+        if (audioContext.state === 'suspended') {{
+            await audioContext.resume();
+            console.log('AudioContext resumed');
+        }}
+        return true;
+    }} catch (error) {{
+        console.error('AudioContext initialization failed:', error);
+        return false;
     }}
-    return audioContext;
 }}
 
-async function decodeAndSchedule(chunkBase64) {{
+async function processChunk(base64Data) {{
     try {{
-        const audioContext = await initAudioContext();
-        const binaryString = window.atob(chunkBase64);
+        // Convert base64 to ArrayBuffer
+        const binaryString = atob(base64Data);
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {{
             bytes[i] = binaryString.charCodeAt(i);
         }}
         
+        // Decode and schedule audio
         const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
         const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(audioContext.destination);
         
-        const startTime = Math.max(nextScheduledTime, audioContext.currentTime);
+        // Calculate optimal start time
+        const now = audioContext.currentTime;
+        const startTime = Math.max(nextScheduledTime, now);
         source.start(startTime);
         nextScheduledTime = startTime + audioBuffer.duration;
         
-        // Keep only needed buffers
-        while ((nextScheduledTime - audioContext.currentTime) > MAX_BUFFER_AHEAD) {{
-            await new Promise(resolve => setTimeout(resolve, 100));
-        }}
+        console.log('Scheduled chunk at:', startTime, 'duration:', audioBuffer.duration);
+        
     }} catch (error) {{
-        console.error('Audio processing error:', error);
+        console.error('Error processing chunk:', error);
     }}
 }}
 
-// Listen for audio chunks from Python
-window.addEventListener('message', (event) => {{
+// Message handler
+window.addEventListener('message', async (event) => {{
     if (event.data.type === 'AUDIO_CHUNK') {{
-        decodeAndSchedule(event.data.chunk);
+        if (!audioContext || audioContext.state !== 'running') {{
+            console.log('AudioContext not ready, initializing...');
+            const success = await initAudioContext();
+            if (!success) return;
+        }}
+        
+        await processChunk(event.data.chunk);
     }}
 }});
 
-// Initialize audio context on user interaction
+// Initialize on any click
 document.addEventListener('click', async () => {{
-    await initAudioContext();
-}}, {{ once: true }});
+    const success = await initAudioContext();
+    if (success) {{
+        window.parent.postMessage({{ type: 'AUDIO_READY' }}, '*');
+    }}
+}});
 </script>
 """
 
 components.html(html_code, height=0)
 
-# Audio generation loop
-while st.session_state.running:
-    start_time = time.time()
-    
+# Audio generation and streaming logic
+if start_btn:
+    st.session_state.running = True
+
+if stop_btn:
+    st.session_state.running = False
+
+if st.session_state.running:
     # Generate and send audio chunk
     freq = np.random.choice(FREQUENCIES)
     chunk = generate_wav_chunk(freq)
@@ -118,7 +138,18 @@ while st.session_state.running:
         height=0
     )
     
-    # Calculate sleep time to maintain real-time generation
-    elapsed = time.time() - start_time
-    sleep_time = max(CHUNK_DURATION - elapsed, 0)
-    time.sleep(sleep_time)
+    # Maintain streaming loop
+    time.sleep(CHUNK_DURATION * 0.9)  # Slightly faster than real-time
+    st.rerun()
+
+# Initialization check
+if not st.session_state.audio_initialized:
+    components.html(
+        """
+        <script>
+            window.parent.postMessage({ type: 'AUDIO_INIT' }, '*');
+        </script>
+        """,
+        height=0
+    )
+    st.session_state.audio_initialized = True
