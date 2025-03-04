@@ -2,3 +2,6 @@ numpy
 pandas
 ffmpeg-python
 streamlit
+streamlit-webrtc 
+av 
+pydub

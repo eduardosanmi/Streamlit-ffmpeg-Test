@@ -1,3 +1,40 @@
+import streamlit as st
+import numpy as np
+import av
+from pydub import AudioSegment
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
+
+# Streamlit UI
+st.title("🎵 Real-Time Frequency Streaming (No SoundDevice)")
+
+# Frequency slider (updates dynamically)
+frequency = st.slider("Frequency (Hz)", 100, 1000, 440, step=10)
+
+# Generate a sine wave for a given frequency
+def generate_sine_wave(freq, duration=0.5, sample_rate=44100):
+    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+    waveform = 0.5 * np.sin(2 * np.pi * freq * t)  # 50% volume sine wave
+    audio = (waveform * 32767).astype(np.int16)  # Convert to int16
+    return audio.tobytes()
+
+# WebRTC audio streamer
+def audio_callback(frame: av.AudioFrame) -> av.AudioFrame:
+    audio_data = generate_sine_wave(frequency)
+    audio_segment = AudioSegment(
+        data=audio_data,
+        sample_width=2,
+        frame_rate=44100,
+        channels=1
+    )
+    return av.AudioFrame.from_ndarray(np.array(audio_segment.get_array_of_samples()), format="s16")
+
+webrtc_streamer(
+    key="audio-stream",
+    mode=WebRtcMode.SENDONLY,
+    audio_frame_callback=audio_callback,
+    media_stream_constraints={"audio": True, "video": False},
+)
+
 import pathlib
 import subprocess
 
@@ -10,8 +47,6 @@ uploaded_mp3_file_length = 0
 filename = None
 downloadfile = None
 
-
-@st.experimental_memo
 def convert_mp3_to_wav_ffmpeg_bytes2bytes(input_data: bytes) -> bytes:
     """
     It converts mp3 to wav using ffmpeg
@@ -30,11 +65,8 @@ def convert_mp3_to_wav_ffmpeg_bytes2bytes(input_data: bytes) -> bytes:
         ['ffmpeg'] + args, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     return proc.communicate(input=input_data)[0]
 
-
-@st.experimental_memo
 def on_file_change(uploaded_mp3_file):
     return convert_mp3_to_wav_ffmpeg_bytes2bytes(uploaded_mp3_file.getvalue())
-
 
 def on_change_callback():
     """
